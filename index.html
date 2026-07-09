@@ -777,6 +777,29 @@ function dedupeByMsgId(existingArr, newArr){
   return Array.from(map.values());
 }
 
+/* Lapisan pengaman: kalau lastXlsxRows gak tersedia (misal data cloud dari sebelum fitur ini
+   ada), status hasil merge XLSX yang SUDAH ada di STATE.trades saat ini tetap dipertahankan
+   dengan cara "dibawa" ke trades yang baru dibangun ulang dari JSON — dicocokkan by symbol+tanggal. */
+function preserveXlsxMergeAcrossJsonUpdate(oldTrades, newTrades){
+  const keyOf = t => (t.symbol||'').toUpperCase()+'|'+String(t.date).slice(0,10);
+  const oldByKey = new Map();
+  oldTrades.forEach(t=>{
+    if (t.source==='JSON+XLSX' || t.source==='XLSX') oldByKey.set(keyOf(t), t);
+  });
+  const usedKeys = new Set();
+  const merged = newTrades.map(t=>{
+    const k = keyOf(t);
+    const old = oldByKey.get(k);
+    if (!old) return t;
+    usedKeys.add(k);
+    return Object.assign({}, t, { source:'JSON+XLSX', status: old.status, return_pct: old.return_pct });
+  });
+  const leftoverOld = Array.from(oldByKey.entries())
+    .filter(([k,t])=> t.source==='XLSX' && !usedKeys.has(k))
+    .map(([,t])=>t);
+  return merged.concat(leftoverOld);
+}
+
 function handleFile(file){
   STATE.filename = file.name;
   const reader = new FileReader();
@@ -785,6 +808,7 @@ function handleFile(file){
       const data = JSON.parse(ev.target.result);
       const { signals, results, regimes, others } = parseTelegramExport(data);
       const prevSignalCount = STATE.signals.length, prevResultCount = STATE.results.length;
+      const prevTrades = STATE.trades;
       // Merge (bukan replace) — export JSON baru ditambahkan ke data lama, dedup by msg_id,
       // jadi aman upload berkali-kali (baik export baru maupun re-upload yang sama).
       STATE.signals = dedupeByMsgId(STATE.signals, signals);
@@ -792,6 +816,7 @@ function handleFile(file){
       STATE.regimes = dedupeByMsgId(STATE.regimes, regimes);
       STATE.others  = dedupeByMsgId(STATE.others, others);
       STATE.trades = matchTrades(STATE.signals, STATE.results);
+      STATE.trades = preserveXlsxMergeAcrossJsonUpdate(prevTrades, STATE.trades);
       if (STATE.lastXlsxRows && STATE.lastXlsxRows.length){
         STATE.trades = mergeWithXlsxData(STATE.trades, STATE.lastXlsxRows);
       }
