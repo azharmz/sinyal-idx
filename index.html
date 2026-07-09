@@ -601,6 +601,15 @@ async function restoreIfSaved(){
   STATE.others=saved.others; STATE.trades=saved.trades; STATE.filename=saved.filename; STATE.lastXlsxRows=saved.lastXlsxRows||[];
   STATE.filtered = STATE.trades.slice();
   renderAll();
+  const el = document.getElementById('syncBadge'), txt = document.getElementById('syncBadgeText');
+  if (el && txt){
+    el.className = 'sync-badge sync-offline';
+    const ts = saved.savedAt ? new Date(saved.savedAt) : null;
+    const sameDay = ts && ts.toDateString() === new Date().toDateString();
+    const timeStr = ts ? (sameDay ? ts.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}) : ts.toLocaleDateString('id-ID',{day:'2-digit',month:'2-digit'})+' '+ts.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})) : '?';
+    txt.textContent = '📦 Data lokal per '+timeStr;
+    el.title = 'Belum sinkron ke cloud (offline/belum login) — status sinkronisasi ke cloud';
+  }
   return true;
 }
 
@@ -670,16 +679,28 @@ async function doLogout(){
   updateSyncBadge('offline','Belum login');
 }
 
-function updateSyncBadge(state, msg){
+function updateSyncBadge(state, extra){
   const el = document.getElementById('syncBadge');
   const txt = document.getElementById('syncBadgeText');
   if (!el || !txt) return;
   el.className = 'sync-badge sync-'+state;
-  const now = new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
-  if (state==='syncing') txt.textContent = 'Menyimpan ke cloud...';
-  else if (state==='ok') txt.textContent = '☁ Tersimpan · '+now;
-  else if (state==='error') txt.textContent = '⚠ Gagal sync — klik retry';
-  else txt.textContent = msg || 'Offline';
+  if (state==='syncing'){
+    txt.textContent = 'Menyimpan ke cloud...';
+  } else if (state==='ok'){
+    // extra.loadedAt = timestamp ASLI dari kolom updated_at pas ambil data cloud (bukan jam sekarang).
+    // Tanpa extra (dipanggil setelah save) berarti memang baru saja disimpan, jam sekarang valid.
+    const isLoad = extra && extra.loadedAt;
+    const ts = isLoad ? new Date(extra.loadedAt) : new Date();
+    const sameDay = ts.toDateString() === new Date().toDateString();
+    const timeStr = sameDay
+      ? ts.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})
+      : ts.toLocaleDateString('id-ID',{day:'2-digit',month:'2-digit'})+' '+ts.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
+    txt.textContent = (isLoad ? '☁ Data cloud per ' : '☁ Tersimpan · ') + timeStr;
+  } else if (state==='error'){
+    txt.textContent = '⚠ Gagal sync — klik retry';
+  } else {
+    txt.textContent = (typeof extra === 'string' ? extra : null) || 'Offline';
+  }
   el.title = state==='error' ? 'Klik untuk coba sync ulang' : 'Status sinkronisasi ke cloud';
   el.onclick = state==='error' ? saveStateToSupabase : null;
 }
@@ -715,7 +736,7 @@ async function loadStateFromSupabase(){
     STATE.filtered = STATE.trades.slice();
     renderAll();
     saveStateToDB(); // keep local cache warm too
-    updateSyncBadge('ok');
+    updateSyncBadge('ok', { loadedAt: data.updated_at });
     return true;
   } catch(err){ console.warn('Gagal ambil data cloud:', err); updateSyncBadge('error'); return false; }
 }
