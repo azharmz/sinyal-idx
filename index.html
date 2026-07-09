@@ -219,7 +219,7 @@
     </div>
     <div class="file-controls" id="fileControls" style="display:none">
       <span class="filename-tag" id="filenameTag"></span>
-      <button onclick="document.getElementById('fileInput').click()">Ganti File</button>
+      <button onclick="document.getElementById('fileInput').click()" title="Upload result.json — otomatis digabung dengan data yang sudah ada, aman upload berkali-kali">+ Tambah/Update JSON</button>
       <button onclick="document.getElementById('xlsxInput').click()" title="Upload dashboard export (xlsx) untuk melengkapi status TP HIT/SL HIT/EXPIRED">📊 Upload Hasil (XLSX)</button>
       <button class="primary" onclick="downloadExcel()">⬇ Export Excel (.xlsx)</button>
       <button onclick="clearSavedData()" title="Hapus data tersimpan dari browser ini">🗑 Hapus Data</button>
@@ -522,7 +522,7 @@ function matchTrades(signals, results){
 }
 
 /* ============================= APP STATE ============================= */
-let STATE = { signals:[], results:[], regimes:[], others:[], trades:[], filtered:[], page:1, pageSize:25, filename:'' };
+let STATE = { signals:[], results:[], regimes:[], others:[], trades:[], filtered:[], page:1, pageSize:25, filename:'', lastXlsxRows:[] };
 
 /* ============================= PERSISTENCE (IndexedDB) =============================
    Data disimpan lokal di browser (bukan di server manapun) supaya tidak perlu upload
@@ -546,7 +546,7 @@ async function saveStateToDB(){
   try{
     const db = await openDB();
     const payload = { signals:STATE.signals, results:STATE.results, regimes:STATE.regimes,
-                       others:STATE.others, trades:STATE.trades, filename:STATE.filename, savedAt:Date.now() };
+                       others:STATE.others, trades:STATE.trades, filename:STATE.filename, lastXlsxRows:STATE.lastXlsxRows, savedAt:Date.now() };
     await new Promise((resolve, reject)=>{
       const tx = db.transaction(STORE_NAME, 'readwrite');
       tx.objectStore(STORE_NAME).put(payload, STATE_KEY);
@@ -598,7 +598,7 @@ async function restoreIfSaved(){
   const saved = await loadStateFromDB();
   if (!saved || !saved.trades || !saved.trades.length) return false;
   STATE.signals=saved.signals; STATE.results=saved.results; STATE.regimes=saved.regimes;
-  STATE.others=saved.others; STATE.trades=saved.trades; STATE.filename=saved.filename;
+  STATE.others=saved.others; STATE.trades=saved.trades; STATE.filename=saved.filename; STATE.lastXlsxRows=saved.lastXlsxRows||[];
   STATE.filtered = STATE.trades.slice();
   renderAll();
   return true;
@@ -691,7 +691,7 @@ async function saveStateToSupabase(){
     if (!session){ updateSyncBadge('offline','Belum login'); return; }
     updateSyncBadge('syncing');
     const payload = { signals:STATE.signals, results:STATE.results, regimes:STATE.regimes,
-                       others:STATE.others, trades:STATE.trades, filename:STATE.filename };
+                       others:STATE.others, trades:STATE.trades, filename:STATE.filename, lastXlsxRows:STATE.lastXlsxRows };
     const { error } = await sb.from('trades_data').upsert({
       user_id: session.user.id, payload, updated_at: new Date().toISOString()
     });
@@ -711,7 +711,7 @@ async function loadStateFromSupabase(){
     if (!data || !data.payload || !data.payload.trades || !data.payload.trades.length){ updateSyncBadge('offline','Belum ada data cloud'); return false; }
     const p = data.payload;
     STATE.signals=p.signals; STATE.results=p.results; STATE.regimes=p.regimes;
-    STATE.others=p.others; STATE.trades=p.trades; STATE.filename=p.filename;
+    STATE.others=p.others; STATE.trades=p.trades; STATE.filename=p.filename; STATE.lastXlsxRows=p.lastXlsxRows||[];
     STATE.filtered = STATE.trades.slice();
     renderAll();
     saveStateToDB(); // keep local cache warm too
@@ -767,6 +767,16 @@ emptyState.addEventListener('drop', e=>{
   if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
 });
 
+/* Gabungin array lama+baru berdasarkan msg_id (ID pesan Telegram, unik & gak berubah).
+   Kalau msg_id sama muncul lagi (pesan diedit / export tumpang tindih), versi BARU menang —
+   supaya kalau bot mengedit pesan (misal update status), datanya ikut ter-update. */
+function dedupeByMsgId(existingArr, newArr){
+  const map = new Map();
+  existingArr.forEach(item=>map.set(item.msg_id, item));
+  newArr.forEach(item=>map.set(item.msg_id, item));
+  return Array.from(map.values());
+}
+
 function handleFile(file){
   STATE.filename = file.name;
   const reader = new FileReader();
@@ -774,12 +784,28 @@ function handleFile(file){
     try{
       const data = JSON.parse(ev.target.result);
       const { signals, results, regimes, others } = parseTelegramExport(data);
-      STATE.signals=signals; STATE.results=results; STATE.regimes=regimes; STATE.others=others;
-      STATE.trades = matchTrades(signals, results);
+      const prevSignalCount = STATE.signals.length, prevResultCount = STATE.results.length;
+      // Merge (bukan replace) — export JSON baru ditambahkan ke data lama, dedup by msg_id,
+      // jadi aman upload berkali-kali (baik export baru maupun re-upload yang sama).
+      STATE.signals = dedupeByMsgId(STATE.signals, signals);
+      STATE.results = dedupeByMsgId(STATE.results, results);
+      STATE.regimes = dedupeByMsgId(STATE.regimes, regimes);
+      STATE.others  = dedupeByMsgId(STATE.others, others);
+      STATE.trades = matchTrades(STATE.signals, STATE.results);
+      if (STATE.lastXlsxRows && STATE.lastXlsxRows.length){
+        STATE.trades = mergeWithXlsxData(STATE.trades, STATE.lastXlsxRows);
+      }
       STATE.filtered = STATE.trades.slice();
       renderAll();
       saveStateToDB();
       saveStateToSupabase();
+      const newSignals = STATE.signals.length - prevSignalCount;
+      const newResults = STATE.results.length - prevResultCount;
+      if (prevSignalCount > 0){
+        // bukan upload pertama kali — kasih tahu berapa yang beneran baru ditambahkan
+        document.getElementById('dataNote').insertAdjacentHTML('afterbegin',
+          '<div style="margin-bottom:8px;color:var(--green)">✓ Digabung: +'+Math.max(newSignals,0)+' sinyal baru, +'+Math.max(newResults,0)+' hasil baru (total sinyal sekarang '+STATE.signals.length+').</div>');
+      }
     } catch(err){
       alert('Gagal parsing file. Pastikan ini adalah result.json hasil export Telegram (Messages, format JSON).\n\n'+err.message);
     }
@@ -834,7 +860,16 @@ function mergeWithXlsxData(trades, xlsxRows){
     (xlsxByKey[k]=xlsxByKey[k]||[]).push(r);
   });
   const usedUid = new Set();
+  // Kunci symbol+tanggal yang SUDAH ada sebagai trade 'XLSX saja' dari upload sebelumnya —
+  // dipakai supaya upload xlsx yang sama gak nambahin baris duplikat.
+  const existingXlsxOnlyKeys = new Set(
+    trades.filter(t=>t.source==='XLSX').map(t=>(t.symbol||'').toUpperCase()+'|'+String(t.date).slice(0,10))
+  );
   const merged = trades.map(t=>{
+    // Trade yang sumbernya sudah murni 'XLSX' (gak punya sinyal JSON asli) TIDAK dijadikan
+    // kandidat match lagi — kalau ikut di-match ulang, dia bakal salah kelabel jadi
+    // 'JSON+XLSX' padahal tetap gak punya data teknikal (MACD/RSI/dst).
+    if (t.source === 'XLSX') return t;
     const k = (t.symbol||'').toUpperCase()+'|'+String(t.date).slice(0,10);
     const candidates = (xlsxByKey[k]||[]).filter(r=>!usedUid.has(r._uid));
     let match=null;
@@ -852,12 +887,15 @@ function mergeWithXlsxData(trades, xlsxRows){
       return_pct: match.return_pct || t.return_pct
     });
   });
-  const leftover = xlsxRows.filter(r=>!usedUid.has(r._uid)).map(r=>({
-    date: r.date, symbol: r.symbol, signal_type: r.decision || null,
-    entry_price: r.entry, stop_loss: r.sl, take_profit: r.tp,
-    confidence_score: null, status: r.status, return_pct: r.return_pct,
-    source: 'XLSX'
-  }));
+  const leftover = xlsxRows
+    .filter(r=>!usedUid.has(r._uid))
+    .filter(r=>!existingXlsxOnlyKeys.has(r.symbol+'|'+r.date))
+    .map(r=>({
+      date: r.date, symbol: r.symbol, signal_type: r.decision || null,
+      entry_price: r.entry, stop_loss: r.sl, take_profit: r.tp,
+      confidence_score: null, status: r.status, return_pct: r.return_pct,
+      source: 'XLSX'
+    }));
   return merged.concat(leftover).sort((a,b)=> new Date(b.date)-new Date(a.date));
 }
 
@@ -870,6 +908,7 @@ function handleXlsxFile(file){
       const xlsxRows = parseXlsxDashboard(wb);
       if (!xlsxRows.length){ alert('Tidak ada baris valid ditemukan di file xlsx ini. Pastikan formatnya sesuai dashboard (tanggal, simbol, decision, entry, sl, tp, status, return%).'); return; }
       STATE.trades = mergeWithXlsxData(STATE.trades, xlsxRows);
+      STATE.lastXlsxRows = xlsxRows;
       STATE.filtered = STATE.trades.slice();
       renderAll();
       saveStateToDB();
@@ -892,7 +931,7 @@ function renderAll(){
   document.getElementById('emptyState').style.display='none';
   document.getElementById('dashboard').style.display='block';
   document.getElementById('fileControls').style.display='flex';
-  document.getElementById('filenameTag').textContent = STATE.filename;
+  document.getElementById('filenameTag').textContent = STATE.signals.length+' sinyal total · terakhir: '+STATE.filename;
 
   const srcCounts = STATE.trades.reduce((a,t)=>{ a[t.source]=(a[t.source]||0)+1; return a; }, {});
   const hasXlsx = (srcCounts['JSON+XLSX']||0) + (srcCounts['XLSX']||0) > 0;
