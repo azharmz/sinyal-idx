@@ -544,10 +544,10 @@ function matchTrades(signals, results){
       let duration_days=null, duration_source=null;
       if (terminal){
         if (terminal.duration_days_confirm != null){
-          duration_days = Math.round(terminal.duration_days_confirm*100)/100;
+          duration_days = Math.round(terminal.duration_days_confirm*1e6)/1e6;
           duration_source = 'confirm';
         } else {
-          duration_days = Math.round(((new Date(terminal.date).getTime() - sigDate.getTime()) / 86400000)*100)/100;
+          duration_days = Math.round(((new Date(terminal.date).getTime() - sigDate.getTime()) / 86400000)*1e6)/1e6;
           duration_source = 'result';
         }
       }
@@ -1013,7 +1013,7 @@ function mergeWithXlsxData(trades, xlsxRows){
     let duration_days = jsonDurationInvalid ? null : t.duration_days;
     let duration_source = jsonDurationInvalid ? null : t.duration_source;
     if (duration_days == null && xlsxConfirmTs){
-      duration_days = Math.round(((xlsxConfirmTs.getTime() - new Date(t.date).getTime()) / 86400000)*100)/100;
+      duration_days = Math.round(((xlsxConfirmTs.getTime() - new Date(t.date).getTime()) / 86400000)*1e6)/1e6;
       duration_source = 'xlsx';
     }
     return Object.assign({}, t, {
@@ -1073,11 +1073,15 @@ function fmtRp(v){ return v==null ? '—' : 'Rp'+Math.round(v).toLocaleString('i
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('id-ID',{year:'numeric',month:'2-digit',day:'2-digit'}); }
 function pctNum(s){ if (s==null) return null; const v=parseFloat(String(s).replace('%','').replace(',', '.')); return isNaN(v)?null:v; }
 
+const SUSPICIOUS_DURATION_MINUTES = 15; // durasi di bawah ini dianggap kejanggalan buat dicek (kemungkinan data backfill/replay, bukan pergerakan pasar riil)
 function durationSourceLabel(src){
   if (src==='confirm') return 'Durasi dari field durasi eksplisit di pesan konfirmasi (bot versi baru)';
   if (src==='result') return 'Durasi riil: selisih waktu pesan sinyal ke waktu pesan konfirmasi (TP HIT/LOCKED)';
   if (src==='xlsx') return 'Estimasi: selisih waktu sinyal ke tanggal snapshot XLSX (jam 17:30), dipakai karena gak ada pesan konfirmasi di JSON';
   return 'Belum diketahui';
+}
+function durationSourceIcon(src){
+  return src==='confirm' ? '📄' : src==='result' ? '⏱' : src==='xlsx' ? '≈' : '';
 }
 function formatDuration(t){
   if (t.duration_days==null) return '—';
@@ -1086,7 +1090,11 @@ function formatDuration(t){
   const hours = Math.floor((totalMinutes%1440)/60);
   const minutes = totalMinutes%60;
   const text = days+':'+String(hours).padStart(2,'0')+':'+String(minutes).padStart(2,'0');
-  return '<span title="'+durationSourceLabel(t.duration_source)+'">'+text+'</span>';
+  const icon = durationSourceIcon(t.duration_source);
+  const suspicious = totalMinutes < SUSPICIOUS_DURATION_MINUTES;
+  let title = durationSourceLabel(t.duration_source);
+  if (suspicious) title += ' — ⚠️ durasi sangat pendek (<'+SUSPICIOUS_DURATION_MINUTES+' menit), kemungkinan data backfill/replay bot, bukan pergerakan pasar riil';
+  return '<span title="'+title+'">'+text+' <span style="opacity:.6">'+icon+'</span>'+(suspicious?' ⚠️':'')+'</span>';
 }
 
 function renderAll(){
@@ -1102,12 +1110,12 @@ function renderAll(){
       'Rincian: <b>'+(srcCounts['JSON+XLSX']||0)+'</b> trade lengkap (JSON+XLSX), <b>'+(srcCounts['JSON']||0)+'</b> trade JSON saja (belum ada hasil final / pending), '+
       '<b>'+(srcCounts['XLSX']||0)+'</b> trade XLSX saja (di luar cakupan tanggal export Telegram, tanpa data teknikal). '+
       'Win rate di kartu statistik dihitung dari trade yang statusnya sudah final (TP HIT/SL HIT), exclude EXPIRED &amp; yang masih pending. '+
-      'Kolom <b>Durasi</b> (format hari:jam:menit): dari field durasi di pesan konfirmasi kalau ada, kalau tidak dari selisih waktu sinyal-konfirmasi (riil), kalau pesan konfirmasi gak ada (SL HIT/EXPIRED dari XLSX) pakai estimasi ke tanggal snapshot XLSX jam 17:30 — hover teks durasinya buat lihat sumbernya. "—" berarti belum ada datanya. '+
+      'Kolom <b>Durasi</b> (format hari:jam:menit): 📄 dari field durasi di pesan konfirmasi, ⏱ riil dari selisih waktu sinyal-konfirmasi, ≈ estimasi ke tanggal snapshot XLSX jam 17:30 (dipakai kalau gak ada pesan konfirmasi di JSON). Tanda ⚠️ = durasi kurang dari 15 menit, kemungkinan data backfill/replay bot bukan pergerakan pasar riil — layak dicek manual. "—" berarti belum ada datanya. '+
       '<br><b>Data tersimpan otomatis</b> ke akun kamu (online, via Supabase) dan juga di-cache lokal di browser ini. Klik "🗑 Hapus Data" untuk membersihkan.'
     : '<b>Catatan:</b> Channel Telegram ini hanya memposting update saat sinyal <i>profit</i> (TP HIT / Profit Terkunci / Profit Terus Naik). '+
       'Tidak ditemukan pesan Stop-Loss-Hit atau Expired secara publik — jadi sinyal berstatus <span class="amber-txt">NO RESULT</span> berarti belum ada '+
       'update publik, bukan berarti gagal. Klik <b>"+ Tambah/Update XLSX"</b> untuk melengkapi dengan status final (termasuk SL HIT/EXPIRED) dari dashboard.'+
-      'Kolom <b>Durasi</b> (format hari:jam:menit) baru lengkap setelah XLSX digabung — hover teksnya buat lihat sumber perhitungannya. "—" berarti belum ada datanya. '+
+      'Kolom <b>Durasi</b> (format hari:jam:menit): ⏱ riil dari selisih waktu sinyal-konfirmasi. Tanda ⚠️ = durasi kurang dari 15 menit, kemungkinan data backfill/replay bot. "—" berarti belum ada datanya. '+
       '<br><b>Data tersimpan otomatis</b> ke akun kamu (online, via Supabase) dan juga di-cache lokal di browser ini. Klik "🗑 Hapus Data" untuk membersihkan.';
 
   renderStats();
