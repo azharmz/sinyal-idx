@@ -495,6 +495,7 @@ function parseTelegramExport(data){
 /* match each signal to its outcome by symbol + date window */
 function matchTrades(signals, results){
   const RUNNING_FRESH_DAYS = 3; // sinyal terakhir tanpa laporan apa pun dianggap RUNNING hanya jika masih dalam N hari terakhir dari data
+  const ENTRY_MATCH_TOLERANCE_PCT = 0.05; // toleransi selisih harga entry (%) — dibuat sangat ketat (hampir exact match), cuma jaga-jaga pembulatan desimal saat parsing, BUKAN buat "memaafkan" selisih riil. Sinyal & konfirmasi yang benar-benar berpasangan seharusnya punya harga entry SAMA PERSIS.
   let maxKnownDate = 0;
   signals.forEach(s=>{ const t=new Date(s.date).getTime(); if (t>maxKnownDate) maxKnownDate=t; });
   results.forEach(r=>{ const t=new Date(r.date).getTime(); if (t>maxKnownDate) maxKnownDate=t; });
@@ -511,7 +512,16 @@ function matchTrades(signals, results){
       const nextSigDate = idx+1 < sigs.length ? new Date(sigs[idx+1].date) : null;
       const candidates = resArr.filter(r=>{
         const rd = new Date(r.date);
-        return rd >= sigDate && (!nextSigDate || rd < nextSigDate);
+        const inWindow = rd >= sigDate && (!nextSigDate || rd < nextSigDate);
+        if (!inWindow) return false;
+        // Wajib simbol (udah pasti sama, dari grouping bySymbol) DAN harga entry mendekati —
+        // supaya konfirmasi simbol yang sama tapi beda sinyal (misal 2 sinyal di hari yang
+        // sama, harga beda jauh) gak ketuker asal jatuh di rentang waktu yang tepat.
+        if (r.entry != null && s.entry_price != null && s.entry_price !== 0){
+          const diffPct = Math.abs(r.entry - s.entry_price) / s.entry_price * 100;
+          if (diffPct > ENTRY_MATCH_TOLERANCE_PCT) return false;
+        }
+        return true;
       });
       let status='NO RESULT', return_pct=null, result_ref=null;
       const terminal = candidates.find(r=>r.type==='TP_HIT'||r.type==='PROFIT_LOCKED');
@@ -992,14 +1002,23 @@ function mergeWithXlsxData(trades, xlsxRows){
     }
     if (!match) return Object.assign({}, t, { source: t.source || 'JSON' });
     usedUid.add(match._uid);
-    let duration_days = t.duration_days, duration_source = t.duration_source;
+    const finalStatus = match.status || t.status;
+    // Kalau durasi tadinya dihitung dari konfirmasi JSON (TP_HIT/PROFIT_LOCKED, artinya JSON
+    // "yakin" hasilnya TP HIT/CLOSED), tapi status FINAL dari XLSX ternyata beda (SL HIT/EXPIRED)
+    // — berarti konfirmasi JSON yang ke-pairing itu SALAH (biasanya kepunyaan sinyal simbol
+    // yang sama tapi instance lain) atau datanya sendiri kontradiktif. Durasi itu gak valid,
+    // buang & hitung ulang pakai estimasi snapshot XLSX.
+    const jsonDurationInvalid = (t.duration_source==='confirm' || t.duration_source==='result')
+      && finalStatus !== 'TP HIT' && finalStatus !== 'CLOSED (LOCKED)';
+    let duration_days = jsonDurationInvalid ? null : t.duration_days;
+    let duration_source = jsonDurationInvalid ? null : t.duration_source;
     if (duration_days == null && xlsxConfirmTs){
       duration_days = Math.round(((xlsxConfirmTs.getTime() - new Date(t.date).getTime()) / 86400000)*100)/100;
       duration_source = 'xlsx';
     }
     return Object.assign({}, t, {
       source: 'JSON+XLSX',
-      status: match.status || t.status,
+      status: finalStatus,
       return_pct: match.return_pct || t.return_pct,
       duration_days, duration_source
     });
