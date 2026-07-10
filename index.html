@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Signal AnyApp — Zeta AI Telegram Journal</title>
+<title>IDXSY Signal — Zeta AI Telegram Journal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -21,6 +21,7 @@
     --green: #4fae79;
     --red: #c1554a;
     --blue: #5b8fc9;
+    --accent-halal: #2ED3A3;
     --radius: 3px;
   }
   *{box-sizing:border-box;}
@@ -43,6 +44,7 @@
     color:var(--amber); text-transform:uppercase; margin-bottom:6px;
   }
   h1{ font-family:'Space Grotesk', sans-serif; font-size:26px; margin:0; font-weight:600; letter-spacing:-0.01em;}
+  .topbar__mark--accent{ color:var(--accent-halal); }
   .sub{ color:var(--text-dim); font-size:13px; margin-top:4px; }
   .file-controls{ display:flex; align-items:center; gap:10px; }
   .filename-tag{
@@ -214,7 +216,7 @@
   <header>
     <div>
       <div class="brand-eyebrow">Telegram Export Parser</div>
-      <h1>Signal AnyApp</h1>
+      <h1><span class="topbar__mark--accent">IDXSY</span> Signal</h1>
       <div class="sub">Ubah export JSON grup Telegram sinyal saham jadi jurnal trading terstruktur</div>
     </div>
     <div class="file-controls" id="fileControls" style="display:none">
@@ -305,7 +307,7 @@
         <table>
           <thead><tr>
             <th>Tanggal</th><th>Simbol</th><th>Signal</th><th>Entry</th><th>SL</th><th>TP</th>
-            <th>Confidence</th><th>Status</th><th>Return</th><th>Sumber</th>
+            <th>Confidence</th><th>Status</th><th>Durasi</th><th>Return</th><th>Sumber</th>
           </tr></thead>
           <tbody id="tradesBody"></tbody>
         </table>
@@ -424,6 +426,15 @@ function parseSignal(text, msgId, date){
   const newsBlock = text.match(/Berita Terkait:\s*\n([\s\S]*?)(?:🤖|$)/);
   if (newsBlock){ newsBlock[1].split('\n').map(l=>l.replace(/^•\s*/,'').trim()).filter(Boolean).slice(0,5).forEach((l,i)=>row['news_'+(i+1)]=l); }
   const verM = text.match(/Powered by Zeta AI\s*(v[\d.]+)?/); row.bot_version = verM && verM[1] ? verM[1] : 'v1';
+  /* Durasi eksplisit dari bot (format baru) — belum ada contoh JSON real-nya, jadi pola regex
+     ini best-guess ("Durasi: X hari" / "Durasi: X jam" / "Durasi Sinyal: X hari"). Sesuaikan lagi
+     begitu ada sample JSON terbaru kalau format aslinya beda. */
+  const durM = text.match(/Durasi(?:\s*Sinyal)?:\s*([\d.]+)\s*(hari|jam)/i);
+  if (durM){
+    const durVal = parseFloat(durM[1]);
+    row.duration_days_json = durM[2].toLowerCase()==='jam' ? durVal/24 : durVal;
+    row.duration_raw = durM[0];
+  }
   row.raw_text = text;
   return row;
 }
@@ -515,7 +526,28 @@ function matchTrades(signals, results){
         const ageDays = (maxKnownDate - sigDate.getTime()) / 86400000;
         status = ageDays <= RUNNING_FRESH_DAYS ? 'RUNNING' : 'NO RESULT';
       }
-      trades.push(Object.assign({}, s, {status, return_pct, result_ref, source:'JSON'}));
+
+      /* Durasi — prioritas: (1) field durasi eksplisit dari JSON (bot versi baru),
+         (2) durasi RIIL dari timestamp notifikasi hasil (TP HIT/LOCKED) kalau ada,
+         (3) fallback: jarak ke sinyal berikutnya untuk saham yang sama, asumsi
+         waktu konfirmasi jam 17:30 (dipakai terutama untuk SL HIT/EXPIRED yang
+         cuma diketahui dari XLSX, tanpa timestamp asli). Kalau tidak ada satupun,
+         durasi belum diketahui (null → tampil "—"), termasuk untuk RUNNING/NO RESULT
+         yang belum final. */
+      let duration_days=null, duration_source=null;
+      if (s.duration_days_json != null){
+        duration_days = Math.round(s.duration_days_json*100)/100; duration_source='json';
+      } else if (terminal){
+        duration_days = Math.round(((new Date(terminal.date).getTime() - sigDate.getTime()) / 86400000)*100)/100;
+        duration_source = 'result';
+      } else if (nextSigDate){
+        const confirmTs = new Date(nextSigDate);
+        confirmTs.setHours(17,30,0,0);
+        duration_days = Math.round(((confirmTs.getTime() - sigDate.getTime()) / 86400000)*100)/100;
+        duration_source = 'fallback';
+      }
+
+      trades.push(Object.assign({}, s, {status, return_pct, result_ref, source:'JSON', duration_days, duration_source}));
     });
   }
   return trades.sort((a,b)=>new Date(b.date)-new Date(a.date));
@@ -970,7 +1002,7 @@ function mergeWithXlsxData(trades, xlsxRows){
       date: r.date, symbol: r.symbol, signal_type: r.decision || null,
       entry_price: r.entry, stop_loss: r.sl, take_profit: r.tp,
       confidence_score: null, status: r.status, return_pct: r.return_pct,
-      source: 'XLSX'
+      source: 'XLSX', duration_days: null, duration_source: null
     }));
   return merged.concat(leftover).sort((a,b)=> new Date(b.date)-new Date(a.date));
 }
@@ -1013,6 +1045,22 @@ function fmtRp(v){ return v==null ? '—' : 'Rp'+Math.round(v).toLocaleString('i
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('id-ID',{year:'numeric',month:'2-digit',day:'2-digit'}); }
 function pctNum(s){ if (s==null) return null; const v=parseFloat(String(s).replace('%','').replace(',', '.')); return isNaN(v)?null:v; }
 
+function durationSourceLabel(src){
+  if (src==='json') return 'Durasi dari field JSON (bot versi baru)';
+  if (src==='result') return 'Durasi riil dari timestamp notifikasi hasil (TP HIT/LOCKED)';
+  if (src==='fallback') return 'Estimasi: jarak ke sinyal berikutnya saham sama, asumsi konfirmasi jam 17:30';
+  return 'Belum diketahui';
+}
+function durationSourceIcon(src){
+  return src==='json' ? '📄' : src==='result' ? '⏱' : src==='fallback' ? '≈' : '';
+}
+function formatDuration(t){
+  if (t.duration_days==null) return '<span style="color:var(--text-dim)">—</span>';
+  const d = t.duration_days;
+  const text = d < 1 ? Math.round(d*24)+' jam' : d.toFixed(1)+' hari';
+  return '<span title="'+durationSourceLabel(t.duration_source)+'">'+text+' <span style="opacity:.6">'+durationSourceIcon(t.duration_source)+'</span></span>';
+}
+
 function renderAll(){
   document.getElementById('emptyState').style.display='none';
   document.getElementById('dashboard').style.display='block';
@@ -1026,10 +1074,12 @@ function renderAll(){
       'Rincian: <b>'+(srcCounts['JSON+XLSX']||0)+'</b> trade lengkap (JSON+XLSX), <b>'+(srcCounts['JSON']||0)+'</b> trade JSON saja (belum ada hasil final / pending), '+
       '<b>'+(srcCounts['XLSX']||0)+'</b> trade XLSX saja (di luar cakupan tanggal export Telegram, tanpa data teknikal). '+
       'Win rate di kartu statistik dihitung dari trade yang statusnya sudah final (TP HIT/SL HIT), exclude EXPIRED &amp; yang masih pending. '+
+      'Kolom <b>Durasi</b>: 📄 dari field JSON bot, ⏱ riil dari timestamp notifikasi hasil, ≈ estimasi (jarak ke sinyal berikutnya, asumsi konfirmasi jam 17:30), "—" belum diketahui. '+
       '<br><b>Data tersimpan otomatis</b> ke akun kamu (online, via Supabase) dan juga di-cache lokal di browser ini. Klik "🗑 Hapus Data" untuk membersihkan.'
     : '<b>Catatan:</b> Channel Telegram ini hanya memposting update saat sinyal <i>profit</i> (TP HIT / Profit Terkunci / Profit Terus Naik). '+
       'Tidak ditemukan pesan Stop-Loss-Hit atau Expired secara publik — jadi sinyal berstatus <span class="amber-txt">NO RESULT</span> berarti belum ada '+
       'update publik, bukan berarti gagal. Klik <b>"+ Tambah/Update XLSX"</b> untuk melengkapi dengan status final (termasuk SL HIT/EXPIRED) dari dashboard.'+
+      'Kolom <b>Durasi</b>: 📄 dari field JSON bot, ⏱ riil dari timestamp notifikasi hasil, ≈ estimasi, "—" belum diketahui. '+
       '<br><b>Data tersimpan otomatis</b> ke akun kamu (online, via Supabase) dan juga di-cache lokal di browser ini. Klik "🗑 Hapus Data" untuk membersihkan.';
 
   renderStats();
@@ -1164,6 +1214,7 @@ function renderTradesTable(){
       '<td class="mono">'+fmtRp(t.take_profit)+'</td>'+
       '<td class="mono">'+(t.confidence_score!=null ? t.confidence_score+'/10' : '—')+'</td>'+
       '<td>'+statusBadge(t.status)+'</td>'+
+      '<td class="mono">'+formatDuration(t)+'</td>'+
       '<td class="mono '+pctClass+'" style="font-weight:600">'+(t.return_pct||'—')+'</td>'+
       '<td>'+sourceBadge(t.source)+'</td>'+
       '</tr>';
@@ -1236,6 +1287,7 @@ function openModal(idx){
   html += fieldHtml('SL Konservatif', fmtRp(t.sl_konservatif));
   html += fieldHtml('Confidence', t.confidence_score!=null ? t.confidence_score+'/10 ('+(t.confidence_label||'')+')' : null);
   html += fieldHtml('Status', '<span class="'+pctCls+'">'+t.status+(t.return_pct?' · '+t.return_pct:'')+'</span>');
+  html += fieldHtml('Durasi', formatDuration(t));
   html += '</div>';
   if (t.confidence_reasons) html += '<div class="opinion-box" style="margin-bottom:16px;">'+t.confidence_reasons+'</div>';
 
@@ -1307,7 +1359,7 @@ function download(filename, content, mime){
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 function downloadTradesCSV(){
-  const cols = ['date','symbol','signal_type','entry_price','stop_loss','take_profit','target2_price','confidence_score','confidence_label','status','return_pct','bandar_signal','foreign_status','bot_version'];
+  const cols = ['date','symbol','signal_type','entry_price','stop_loss','take_profit','target2_price','confidence_score','confidence_label','status','duration_days','duration_source','return_pct','bandar_signal','foreign_status','bot_version'];
   download('idx_trade_journal.csv', toCSV(STATE.trades, cols), 'text/csv;charset=utf-8;');
 }
 function downloadExcel(){
@@ -1318,7 +1370,7 @@ function downloadExcel(){
     'bb_lower','bb_upper','adx','adx_label','atr','chart_pattern','candle_pattern','bandar_signal','smart_money_net',
     'top_buyer_1','top_buyer_2','top_buyer_3','top_seller_1','top_seller_2','top_seller_3','beta','beta_label','volatilitas_pct',
     'foreign_status','net_asing','net_asing_lot','foreign_buy_lot','foreign_sell_lot','partisipasi_asing_pct',
-    'analyst_opinion','news_1','news_2','news_3','bot_version','status','return_pct'];
+    'analyst_opinion','news_1','news_2','news_3','bot_version','status','duration_days','duration_source','return_pct'];
   const tradeSheet = XLSX.utils.json_to_sheet(STATE.trades.map(t=>{
     const o={}; tradeCols.forEach(c=>o[c]=t[c]!==undefined?t[c]:''); return o;
   }), {header:tradeCols});
