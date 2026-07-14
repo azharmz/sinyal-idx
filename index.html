@@ -506,8 +506,23 @@ function parseTelegramExport(data){
 
 /* match each signal to its outcome by symbol + date window */
 function matchTrades(signals, results){
-  const RUNNING_FRESH_DAYS = 3; // sinyal terakhir tanpa laporan apa pun dianggap RUNNING hanya jika masih dalam N hari terakhir dari data
+  const RUNNING_FRESH_DAYS = 5; // sinyal terakhir tanpa laporan apa pun dianggap RUNNING hanya jika masih dalam N HARI KERJA (Senin-Jumat, gak termasuk Sabtu/Minggu) terakhir dari data
   const ENTRY_MATCH_TOLERANCE_PCT = 0.05; // toleransi selisih harga entry (%) — dibuat sangat ketat (hampir exact match), cuma jaga-jaga pembulatan desimal saat parsing, BUKAN buat "memaafkan" selisih riil. Sinyal & konfirmasi yang benar-benar berpasangan seharusnya punya harga entry SAMA PERSIS.
+  // Hitung jumlah hari KERJA (Senin-Jumat) yang terlewati antara dua timestamp, exclude Sabtu & Minggu.
+  // Dipakai buat nentuin umur sinyal yang belum ada laporan hasil sama sekali (RUNNING vs NO RESULT),
+  // karena bursa IDX libur weekend jadi gak fair kalau weekend ikut dihitung sebagai "umur nunggu".
+  function countBusinessDaysBetween(startMs, endMs){
+    const start = new Date(startMs); start.setHours(0,0,0,0);
+    const end = new Date(endMs); end.setHours(0,0,0,0);
+    let count = 0;
+    const cur = new Date(start);
+    while (cur.getTime() < end.getTime()){
+      cur.setDate(cur.getDate()+1);
+      const dow = cur.getDay(); // 0=Minggu, 6=Sabtu
+      if (dow !== 0 && dow !== 6) count++;
+    }
+    return count;
+  }
   let maxKnownDate = 0;
   signals.forEach(s=>{ const t=new Date(s.date).getTime(); if (t>maxKnownDate) maxKnownDate=t; });
   results.forEach(r=>{ const t=new Date(r.date).getTime(); if (t>maxKnownDate) maxKnownDate=t; });
@@ -541,8 +556,8 @@ function matchTrades(signals, results){
       if (terminal){ status = terminal.type==='TP_HIT' ? 'TP HIT' : 'CLOSED (LOCKED)'; return_pct=terminal.profit_pct; result_ref=terminal; }
       else if (running){ status='RUNNING'; return_pct=running.profit_pct; result_ref=running; }
       else if (!nextSigDate){
-        const ageDays = (maxKnownDate - sigDate.getTime()) / 86400000;
-        status = ageDays <= RUNNING_FRESH_DAYS ? 'RUNNING' : 'NO RESULT';
+        const ageBusinessDays = countBusinessDaysBetween(sigDate.getTime(), maxKnownDate);
+        status = ageBusinessDays <= RUNNING_FRESH_DAYS ? 'RUNNING' : 'NO RESULT';
       }
 
       /* Durasi — tahap 1 (JSON saja), prioritas:
@@ -1484,9 +1499,8 @@ function downloadExcel(){
 </html>
 <!--
   IDXSY Signal — Version Log
-  v1.2 - 2026-07-14 - Fix: file-controls (tombol upload JSON/XLSX, export, hapus data,
-                       sync badge, logout) belum responsif di HP — belum bisa wrap
-                       sehingga overflow horizontal. Ditambahkan flex-wrap pada
-                       .file-controls + penyesuaian ukuran header/.wrap/h1/button
-                       khusus layar ≤600px.
+  v1.3 - 2026-07-14 - Update: batas RUNNING vs NO RESULT (sinyal tanpa laporan hasil
+                       apa pun) diubah dari 3 hari kalender jadi 5 HARI KERJA
+                       (Senin-Jumat, gak termasuk Sabtu & Minggu). Ditambahkan
+                       countBusinessDaysBetween() untuk hitung umur sinyal.
 -->
