@@ -812,13 +812,25 @@ async function checkAndSyncFromCloud(localSavedAt){
     updateSyncBadge('loading');
     const { data, error } = await sb.from('trades_data').select('payload, updated_at').eq('user_id', session.user.id).maybeSingle();
     if (error){ console.warn('Gagal ambil data cloud:', error.message); updateSyncBadge('error'); return; }
-    if (!data || !data.payload || !data.payload.trades || !data.payload.trades.length){ updateSyncBadge('offline','Belum ada data cloud'); return; }
+    if (!data || !data.payload || !data.payload.signals || !data.payload.signals.length){ updateSyncBadge('offline','Belum ada data cloud'); return; }
     const p = data.payload;
     STATE.signals=p.signals; STATE.results=p.results; STATE.regimes=p.regimes;
-    STATE.others=p.others; STATE.trades=p.trades; STATE.filename=p.filename; STATE.lastXlsxRows=p.lastXlsxRows||[];
+    STATE.others=p.others; STATE.filename=p.filename; STATE.lastXlsxRows=p.lastXlsxRows||[];
+    // Hitung ulang trades[] dari signals/results yang baru ditarik (BUKAN pakai p.trades
+    // apa adanya) — supaya sinyal/konfirmasi baru dari automasi Telegram (yang cuma nulis ke
+    // signals[]/results[]/regimes[], gak recompute trades[] sendiri di sisi automasi) otomatis
+    // ke-refresh di sini, tanpa perlu upload JSON manual lagi. Logic gabung/matching tetap
+    // SATU sumber kebenaran (fungsi yang sama dipakai pas upload JSON manual), cuma dipicu di
+    // titik yang beda (cloud load, bukan file upload).
+    const prevTrades = p.trades || [];
+    STATE.trades = matchTrades(STATE.signals, STATE.results);
+    STATE.trades = preserveXlsxMergeAcrossJsonUpdate(prevTrades, STATE.trades);
+    if (STATE.lastXlsxRows && STATE.lastXlsxRows.length){
+      STATE.trades = mergeWithXlsxData(STATE.trades, STATE.lastXlsxRows);
+    }
     STATE.filtered = STATE.trades.slice();
     renderAll();
-    saveStateToDB(); // samakan cache lokal biar next-load gak perlu narik lagi
+    saveStateToDB(); // samakan cache lokal biar next-load gak perlu narik & hitung ulang lagi
     updateSyncBadge('ok', { loadedAt: data.updated_at });
   } catch(err){ console.warn('Gagal sync dari cloud:', err); updateSyncBadge('error'); }
 }
@@ -1032,9 +1044,15 @@ function mergeWithXlsxData(trades, xlsxRows){
     const finalStatus = match.status || t.status;
     // Kalau durasi tadinya dihitung dari konfirmasi JSON (TP_HIT/PROFIT_LOCKED, artinya JSON
     // "yakin" hasilnya TP HIT/CLOSED), tapi status FINAL dari XLSX ternyata beda (SL HIT/EXPIRED)
-    // — berarti konfirmasi JSON yang ke-pairing itu SALAH (biasanya kepunyaan sinyal simbol
-    // yang sama tapi instance lain) atau datanya sendiri kontradiktif. Durasi itu gak valid,
-    // buang & hitung ulang pakai estimasi snapshot XLSX.
+    // — ini BUKAN berarti salah pairing/data kontradiktif. Ini perilaku resmi bot Zeta AI:
+    // sinyal punya batas waktu tertentu untuk resmi "closed" di harga TP; kalau sampai batas itu
+    // belum resmi closed, sinyal dianggap EXPIRED dan return_pct DIKUNCI di harga terakhir saat
+    // itu — walaupun sempat menyentuh/dekat TP dan profit (return_pct akhirnya bisa tetap positif
+    // tapi di bawah target TP & di bawah peak yang sempat tercapai). Makanya XLSX (status final,
+    // otoritatif) BISA bilang EXPIRED meski JSON publik sempat post pesan "TP1 HIT" — pesan itu
+    // valid utk sinyal ini, cuma statusnya lalu dioverride jadi EXPIRED oleh aturan expiry bot.
+    // Karena itu, durasi dari konfirmasi JSON dianggap gak relevan lagi & dihitung ulang pakai
+    // estimasi snapshot XLSX.
     const jsonDurationInvalid = (t.duration_source==='confirm' || t.duration_source==='result')
       && finalStatus !== 'TP HIT' && finalStatus !== 'CLOSED (LOCKED)';
     let duration_days = jsonDurationInvalid ? null : t.duration_days;
@@ -1499,8 +1517,13 @@ function downloadExcel(){
 </html>
 <!--
   IDXSY Signal — Version Log
-  v1.3 - 2026-07-14 - Update: batas RUNNING vs NO RESULT (sinyal tanpa laporan hasil
-                       apa pun) diubah dari 3 hari kalender jadi 5 HARI KERJA
-                       (Senin-Jumat, gak termasuk Sabtu & Minggu). Ditambahkan
-                       countBusinessDaysBetween() untuk hitung umur sinyal.
+  v1.5 - 2026-07-21 - Fix arsitektur: checkAndSyncFromCloud() sekarang recompute
+                       trades[] dari signals[]/results[] setiap kali load dari cloud
+                       (pakai matchTrades + preserveXlsxMergeAcrossJsonUpdate +
+                       mergeWithXlsxData yang SAMA kayak upload JSON manual), BUKAN
+                       trust payload.trades[] mentah-mentah. Ini supaya automasi
+                       Telegram ingestion (TG-ING-01, nulis ke signals[]/results[]/
+                       regimes[] doang) otomatis ke-render begitu app dibuka, TANPA
+                       perlu upload JSON manual lagi. Logic matching/merge tetap 100%
+                       di sini (JS) sebagai satu-satunya sumber kebenaran.
 -->
